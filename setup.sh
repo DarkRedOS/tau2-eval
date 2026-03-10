@@ -33,40 +33,68 @@ print_warning() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-# Check if running on Ubuntu/Debian (GCP VM default)
+# Detect OS
+OS_TYPE=""
 if [ -f /etc/os-release ]; then
     . /etc/os-release
     if [ "$ID" = "ubuntu" ] || [ "$ID" = "debian" ]; then
+        OS_TYPE="debian"
         print_info "Detected Ubuntu/Debian system"
     else
-        print_warning "Non-Ubuntu/Debian system detected. Some commands may need adjustment."
+        OS_TYPE="linux-other"
+        print_warning "Non-Ubuntu/Debian Linux detected."
     fi
+elif [[ "$OSTYPE" == "darwin"* ]]; then
+    OS_TYPE="macos"
+    print_info "Detected macOS system"
 else
-    print_warning "Cannot detect OS. Assuming Ubuntu/Debian compatible."
+    OS_TYPE="unknown"
+    print_warning "Cannot detect OS. Will attempt to continue."
 fi
 
-# Update package lists
-print_info "Updating package lists..."
-apt-get update -qq
-
-# Install system dependencies
-print_info "Installing system dependencies..."
-apt-get install -y -qq \
-    python3 \
-    python3-pip \
-    python3-venv \
-    python3-dev \
-    git \
-    curl \
-    build-essential \
-    libffi-dev \
-    libssl-dev \
-    2>/dev/null || {
-    print_error "Failed to install system dependencies"
-    exit 1
-}
-
-print_success "System dependencies installed"
+# Install system dependencies based on OS
+if [ "$OS_TYPE" = "debian" ]; then
+    # Ubuntu/Debian (GCP VM)
+    print_info "Updating package lists..."
+    apt-get update -qq
+    
+    print_info "Installing system dependencies..."
+    apt-get install -y -qq \
+        python3 \
+        python3-pip \
+        python3-venv \
+        python3-dev \
+        git \
+        curl \
+        build-essential \
+        libffi-dev \
+        libssl-dev \
+        2>/dev/null || {
+        print_error "Failed to install system dependencies"
+        exit 1
+    }
+    print_success "System dependencies installed"
+elif [ "$OS_TYPE" = "macos" ]; then
+    # macOS - check if dependencies are available
+    print_info "Checking macOS dependencies..."
+    
+    if ! command -v git &> /dev/null; then
+        print_error "git is not installed. Please install Xcode Command Line Tools: xcode-select --install"
+        exit 1
+    fi
+    
+    if ! command -v curl &> /dev/null; then
+        print_error "curl is not installed. Please install it."
+        exit 1
+    fi
+    
+    print_success "macOS dependencies check passed"
+    print_info "Note: On macOS, please ensure Python 3.10+ is installed (e.g., via brew: brew install python@3.10)"
+else
+    # Unknown OS - just check if Python is available
+    print_warning "Unknown OS. Skipping system package installation."
+    print_info "Please ensure Python 3.10+, git, and curl are installed."
+fi
 
 # Check Python version (requires 3.10+)
 PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
