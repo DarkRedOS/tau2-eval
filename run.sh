@@ -317,20 +317,93 @@ if [ $EXIT_CODE -eq 0 ]; then
         cp "$RESULTS_FILE" "${RESULTS_DIR}/"
         print_success "Results saved to: ${RESULTS_DIR}/${SAVE_TO}.json"
         
-        # Display summary
+        # Display summary and create result.json
         echo ""
         echo "=========================================="
         echo "Results Summary"
         echo "=========================================="
-        python3 << EOF
+        export RESULTS_FILE="$RESULTS_FILE"
+        export SCRIPT_DIR="${SCRIPT_DIR}"
+        export DOMAIN="$DOMAIN"
+        export MODEL_NAME="$MODEL_NAME"
+        python3 << 'PYTHON_EOF'
 import json
-import sys
+import os
+
+results_file = os.environ.get("RESULTS_FILE", "")
+script_dir = os.environ.get("SCRIPT_DIR", "")
+domain = os.environ.get("DOMAIN", "mock")
+model = os.environ.get("MODEL_NAME", "unknown")
 
 try:
-    with open("${RESULTS_FILE}", "r") as f:
+    with open(results_file, "r") as f:
         data = json.load(f)
     
-    if isinstance(data, list) and len(data) > 0:
+    # Handle tau2-bench results format (dict with 'simulations' key)
+    if isinstance(data, dict) and "simulations" in data:
+        simulations = data.get("simulations", [])
+        total = len(simulations)
+        
+        rewards = []
+        task_results = {}
+        termination_reasons = {}
+        total_steps = 0
+        
+        for sim in simulations:
+            task_id = sim.get("task_id", "unknown")
+            reward_info = sim.get("reward_info", {})
+            reward = reward_info.get("reward", 0) if isinstance(reward_info, dict) else 0
+            rewards.append(reward)
+            task_results[task_id] = reward
+            
+            reason = sim.get("termination_reason", "unknown")
+            termination_reasons[reason] = termination_reasons.get(reason, 0) + 1
+            
+            messages = sim.get("messages", [])
+            total_steps += len(messages)
+        
+        successful = sum(1 for r in rewards if r > 0)
+        failed = total - successful
+        avg_reward = sum(rewards) / total if total > 0 else 0
+        avg_steps = total_steps / total if total > 0 else 0
+        
+        print(f"Total Tasks: {total}")
+        print(f"Successful: {successful}")
+        print(f"Failed: {failed}")
+        print(f"Success Rate: {successful/total*100:.1f}%")
+        print(f"Average Reward: {avg_reward:.3f}")
+        
+        # Create result.json with standardized format
+        result_json = {
+            "metrics": {
+                "main": {
+                    "name": "pass@1",
+                    "value": round(avg_reward, 4)
+                },
+                "secondary": {
+                    "success_rate": round(successful / total, 4),
+                    "failure_rate": round(failed / total, 4)
+                },
+                "additional": {
+                    "total_tasks": total,
+                    "successful_tasks": successful,
+                    "failed_tasks": failed,
+                    "average_steps": round(avg_steps, 2),
+                    "domain": domain,
+                    "model": model,
+                    "termination_reasons": termination_reasons,
+                    "task_results": task_results
+                }
+            }
+        }
+        
+        # Write result.json
+        result_json_path = os.path.join(script_dir, "result.json")
+        with open(result_json_path, "w") as f:
+            json.dump(result_json, f, indent=2)
+        print(f"\nResult JSON saved to: {result_json_path}")
+        
+    elif isinstance(data, list) and len(data) > 0:
         total = len(data)
         successful = sum(1 for r in data if r.get("reward", 0) > 0)
         failed = total - successful
@@ -340,14 +413,84 @@ try:
         print(f"Successful: {successful}")
         print(f"Failed: {failed}")
         print(f"Success Rate: {successful/total*100:.1f}%")
-        print(f"Average Reward: {avg_reward:.2f}")
+        print(f"Average Reward: {avg_reward:.3f}")
+        
+        # Calculate per-task results
+        task_results = {}
+        for r in data:
+            task_id = r.get("task_id", "unknown")
+            reward = r.get("reward", 0)
+            task_results[task_id] = reward
+        
+        # Count termination reasons
+        termination_reasons = {}
+        total_steps = 0
+        for r in data:
+            reason = r.get("termination_reason", "unknown")
+            termination_reasons[reason] = termination_reasons.get(reason, 0) + 1
+            total_steps += len(r.get("trajectory", []))
+        
+        avg_steps = total_steps / total if total > 0 else 0
+        
+        # Create result.json with standardized format
+        result_json = {
+            "metrics": {
+                "main": {
+                    "name": "pass@1",
+                    "value": round(avg_reward, 4)
+                },
+                "secondary": {
+                    "success_rate": round(successful / total, 4),
+                    "failure_rate": round(failed / total, 4)
+                },
+                "additional": {
+                    "total_tasks": total,
+                    "successful_tasks": successful,
+                    "failed_tasks": failed,
+                    "average_steps": round(avg_steps, 2),
+                    "domain": domain,
+                    "model": model,
+                    "termination_reasons": termination_reasons,
+                    "task_results": task_results
+                }
+            }
+        }
+        
+        # Write result.json
+        result_json_path = os.path.join(script_dir, "result.json")
+        with open(result_json_path, "w") as f:
+            json.dump(result_json, f, indent=2)
+        print(f"\nResult JSON saved to: {result_json_path}")
+        
     else:
-        print("Results format: single simulation")
-        print(f"Reward: {data.get('reward', 'N/A')}")
-        print(f"Success: {data.get('success', 'N/A')}")
+        print("Results format: single simulation or unknown format")
+        reward = data.get("reward", 0) if isinstance(data, dict) else 0
+        print(f"Reward: {reward}")
+        
+        result_json = {
+            "metrics": {
+                "main": {
+                    "name": "pass@1",
+                    "value": reward
+                },
+                "secondary": {},
+                "additional": {
+                    "domain": domain,
+                    "model": model
+                }
+            }
+        }
+        
+        result_json_path = os.path.join(script_dir, "result.json")
+        with open(result_json_path, "w") as f:
+            json.dump(result_json, f, indent=2)
+        print(f"\nResult JSON saved to: {result_json_path}")
+        
 except Exception as e:
     print(f"Could not parse results: {e}")
-EOF
+    import traceback
+    traceback.print_exc()
+PYTHON_EOF
         echo "=========================================="
     else
         print_warning "Results file not found at expected location: $RESULTS_FILE"
