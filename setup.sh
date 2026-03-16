@@ -56,10 +56,10 @@ fi
 if [ "$OS_TYPE" = "debian" ]; then
     # Ubuntu/Debian (GCP VM)
     print_info "Updating package lists..."
-    apt-get update -qq
+    sudo apt-get update -qq
     
     print_info "Installing system dependencies..."
-    apt-get install -y -qq \
+    sudo apt-get install -y -qq \
         python3 \
         python3-pip \
         python3-venv \
@@ -105,54 +105,84 @@ if [ "$(printf '%s\n' "$REQUIRED_VERSION" "$PYTHON_VERSION" | sort -V | head -n1
 fi
 print_success "Python version check passed: $PYTHON_VERSION"
 
-# Install PDM (Python Dependency Manager)
-print_info "Installing PDM..."
-pip3 install -q pdm
-print_success "PDM installed: $(pdm --version)"
-
 # Clone tau2-bench repository if not already present
 REPO_DIR="${SCRIPT_DIR}/tau2-bench-repo"
 if [ ! -d "${REPO_DIR}" ]; then
     print_info "Cloning tau2-bench repository..."
-    git clone https://github.com/sierra-research/tau-bench.git "${REPO_DIR}" 2>/dev/null || {
-        print_warning "Failed to clone from GitHub. Checking for local copy..."
-        if [ -d "${SCRIPT_DIR}/src" ] && [ -f "${SCRIPT_DIR}/pyproject.toml" ]; then
-            print_info "Using local source files"
-            mkdir -p "${REPO_DIR}"
-            cp -r "${SCRIPT_DIR}/src" "${REPO_DIR}/"
-            cp -r "${SCRIPT_DIR}/data" "${REPO_DIR}/" 2>/dev/null || true
-            cp "${SCRIPT_DIR}/pyproject.toml" "${REPO_DIR}/" 2>/dev/null || true
-            cp "${SCRIPT_DIR}/pdm.lock" "${REPO_DIR}/" 2>/dev/null || true
-            cp "${SCRIPT_DIR}/README.md" "${REPO_DIR}/" 2>/dev/null || true
-        else
-            print_error "No repository or local files found"
-            exit 1
-        fi
+    git clone https://github.com/sierra-research/tau2-bench.git "${REPO_DIR}" 2>/dev/null || {
+        print_error "Failed to clone repository"
+        exit 1
     }
 else
     print_info "Repository already exists at ${REPO_DIR}"
 fi
 
-# Create virtual environment using PDM
+# Create virtual environment
 print_info "Setting up Python virtual environment..."
 cd "${REPO_DIR}"
 
-# Initialize PDM if not already initialized
-if [ ! -f "pdm.lock" ]; then
-    print_info "Initializing PDM project..."
-    pdm init -n 2>/dev/null || true
+# Remove old venv if it exists
+if [ -d ".venv" ]; then
+    print_warning "Removing old virtual environment..."
+    rm -rf .venv
 fi
 
-# Install dependencies
-print_info "Installing Python dependencies (this may take a few minutes)..."
-pdm install --prod -q || {
-    print_warning "Production install failed, trying dev install..."
-    pdm install -q
-}
+# Create new venv
+print_info "Creating virtual environment..."
+python3 -m venv .venv
 
-# Install the package in editable mode to get CLI
-print_info "Installing tau2 package..."
-pdm run pip install -e . -q
+# Activate and upgrade pip
+print_info "Upgrading pip..."
+.venv/bin/pip install --upgrade pip -q
+
+# Install PDM in the virtual environment (required for building)
+print_info "Installing PDM in virtual environment..."
+.venv/bin/pip install pdm -q
+print_info "PDM version: $(.venv/bin/pdm --version)"
+
+# Fix pyproject.toml if it has invalid email
+if [ -f "pyproject.toml" ]; then
+    print_info "Fixing pyproject.toml if needed..."
+    # Fix empty email field in authors
+    sed -i 's/email = ""/email = "author@example.com"/g' pyproject.toml 2>/dev/null || \
+    sed -i '' 's/email = ""/email = "author@example.com"/g' pyproject.toml 2>/dev/null || true
+fi
+
+# Install dependencies using PDM (this installs the package too)
+print_info "Installing Python dependencies with PDM..."
+print_info "Running: .venv/bin/pdm install"
+.venv/bin/pdm install 2>&1
+
+# Check if tau2 CLI exists
+print_info "Checking for tau2 CLI..."
+if [ -f ".venv/bin/tau2" ]; then
+    print_success "tau2 CLI found at .venv/bin/tau2"
+else
+    print_warning "tau2 CLI not found in .venv/bin/"
+    print_info "Contents of .venv/bin/:"
+    ls -la .venv/bin/ 2>/dev/null || true
+    
+    # Try using pdm run to execute tau2
+    print_info "Trying 'pdm run tau2 --help'..."
+    if .venv/bin/pdm run tau2 --help > /dev/null 2>&1; then
+        print_success "tau2 works via 'pdm run tau2'"
+        # Create a wrapper script
+        cat > .venv/bin/tau2 << 'EOF'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+exec .venv/bin/pdm run tau2 "$@"
+EOF
+        chmod +x .venv/bin/tau2
+        print_success "Created tau2 wrapper script"
+    else
+        print_error "tau2 CLI not available via pdm run either"
+        print_info "Checking site-packages for tau2 module..."
+        find .venv/lib -name "tau2*" -type d 2>/dev/null || true
+        print_info "Checking for entry_points.txt..."
+        find .venv/lib -name "entry_points.txt" -exec cat {} \; 2>/dev/null || true
+    fi
+fi
 
 print_success "Dependencies installed"
 
@@ -169,8 +199,10 @@ fi
 
 # Verify installation
 print_info "Verifying installation..."
-if pdm run tau2 --help > /dev/null 2>&1; then
+if .venv/bin/tau2 --help > /dev/null 2>&1; then
     print_success "tau2 CLI is working"
+    print_info "tau2 help:"
+    .venv/bin/tau2 --help 2>&1 | head -20 || true
 else
     print_error "tau2 CLI verification failed"
     exit 1
@@ -178,7 +210,7 @@ fi
 
 # Show available domains
 print_info "Available domains:"
-pdm run tau2 run --help 2>&1 | grep -A 20 "domain" | head -10 || true
+.venv/bin/tau2 run --help 2>&1 | grep -A 20 "domain" | head -10 || true
 
 echo ""
 echo "=========================================="
@@ -189,9 +221,5 @@ echo "Repository: ${REPO_DIR}"
 echo "Results: ${RESULTS_DIR}"
 echo ""
 echo "Next steps:"
-echo "  1. Create a config.json file with your settings"
-echo "  2. Run: ./run.sh --config config.json"
-echo ""
-echo "Or run directly with CLI arguments:"
-echo "  ./run.sh --api-url <url> --api-key <key> --model <model> --domain mock"
+echo "  1. Run: ./run.sh --api-url <url> --api-key <key> --model <model> --domain mock"
 echo ""
